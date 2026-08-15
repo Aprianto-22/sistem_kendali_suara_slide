@@ -3,9 +3,7 @@
 
 Proyek ini adalah sistem kendali cerdas berbasis *machine learning* (TinyML) yang memungkinkan pengguna untuk menavigasi slide presentasi menggunakan perintah suara. Sistem ini berjalan sepenuhnya secara lokal (*offline/on-device*) pada mikrokontroler ESP32-S3 dan bertindak sebagai *Bluetooth Keyboard* nirkabel.
 
-Proyek ini dikembangkan oleh **Helmi Aprianto** pada program studi D4 Teknik Elektronika, Universitas Negeri Yogyakarta, di bawah bimbingan **Ibu Dessy Irmawati**.
 
----
 
 ## 🛠️ Perangkat Keras (Hardware)
 Sistem ini menggunakan beberapa komponen utama yang dikemas dalam *casing* cetak 3D kustom (HelmiCase):
