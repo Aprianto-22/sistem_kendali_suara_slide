@@ -13,8 +13,7 @@ Sistem ini menggunakan beberapa komponen utama yang dikemas dalam *casing* cetak
 * **INMP441 (Microphone I2S)**: Sensor penangkap sinyal suara digital.
 * **Buzzer**: Aktuator sebagai indikator audio (*feedback*) saat perintah dikenali.
 
-*(Tambahkan foto perangkat / HelmiCase di sini)*
-`![Desain HelmiCase](link_foto_hardware)`
+
 
 ---
 
