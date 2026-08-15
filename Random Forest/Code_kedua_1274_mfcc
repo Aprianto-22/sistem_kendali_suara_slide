@@ -1,0 +1,406 @@
+import os
+import shutil
+import numpy as np
+import matplotlib.pyplot as plt
+import joblib
+import scipy.io.wavfile as wav
+import pandas as pd
+import matplotlib.ticker as mtick
+
+from scipy.fftpack import dct
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split, KFold, cross_val_score
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.decomposition import PCA
+from scipy.spatial.distance import pdist, squareform
+
+from google.colab import drive
+
+# ==============================
+# 1. MOUNT DRIVE
+# ==============================
+drive.mount('/content/drive')
+
+# ==============================
+# 2. DATASET
+# ==============================
+RAW_DATA_PATH = '/content/drive/MyDrive/ML/Dataset/training'
+PROCESSED_PATH = '/content/dataset_kelompok'
+
+os.makedirs(PROCESSED_PATH, exist_ok=True)
+
+for filename in os.listdir(RAW_DATA_PATH):
+    if filename.endswith(".wav"):
+        label = filename.split('.')[0]
+        label_dir = os.path.join(PROCESSED_PATH, label)
+        os.makedirs(label_dir, exist_ok=True)
+
+        shutil.copy(
+            os.path.join(RAW_DATA_PATH, filename),
+            os.path.join(label_dir, filename)
+        )
+
+# ==============================
+# 3. PARAMETER
+# ==============================
+SR = 16000
+N_MFCC = 13
+FRAME_LENGTH = 0.025
+FRAME_STRIDE = 0.01
+PRE_EMPHASIS = 0.98
+DURATION = 1.0
+NFFT = 256
+M = 32
+
+# Total fitur hasil flatten: 98 frame * 13 koefisien = 1274 fitur
+TOTAL_FEATURES = 1274
+
+# ==============================
+# 4. MFCC MANUAL
+# ==============================
+def extract_features(file_path):
+    try:
+        sr, signal = wav.read(file_path)
+
+        if len(signal.shape) == 2:
+            signal = signal[:,0]
+
+        signal = signal.astype(float)
+
+        target_len = int(SR * DURATION)
+        if len(signal) < target_len:
+            signal = np.pad(signal, (0, target_len - len(signal)))
+        else:
+            signal = signal[:target_len]
+
+        emphasized = np.append(signal[0], signal[1:] - PRE_EMPHASIS * signal[:-1])
+
+        frame_len = int(FRAME_LENGTH * SR)
+        frame_step = int(FRAME_STRIDE * SR)
+
+        num_frames = int(np.floor((len(emphasized) - frame_len) / frame_step)) + 1
+        if num_frames <= 0:
+            return np.zeros(TOTAL_FEATURES)
+
+        frames = np.zeros((num_frames, frame_len))
+        for i in range(num_frames):
+            start = i * frame_step
+            frames[i] = emphasized[start:start+frame_len]
+
+        frames *= np.hamming(frame_len)
+
+        mag = np.abs(np.fft.rfft(frames, NFFT))
+        pow_spec = (1.0 / NFFT) * (mag ** 2)
+
+        def hz_to_mel(hz): return 2595 * np.log10(1 + hz / 700)
+        def mel_to_hz(mel): return 700 * (10**(mel / 2595) - 1)
+
+        mel_points = np.linspace(hz_to_mel(0), hz_to_mel(SR/2), M+2)
+        hz_points = mel_to_hz(mel_points)
+        bins = np.floor((NFFT+1) * hz_points / SR).astype(int)
+
+        fbank = np.zeros((M, int(NFFT/2+1)))
+
+        for m in range(1, M+1):
+            f_m_minus, f_m, f_m_plus = bins[m-1], bins[m], bins[m+1]
+
+            if f_m_minus == f_m or f_m == f_m_plus:
+                continue
+
+            for k in range(f_m_minus, f_m):
+                fbank[m-1, k] = (k - f_m_minus) / (f_m - f_m_minus)
+            for k in range(f_m, f_m_plus):
+                fbank[m-1, k] = (f_m_plus - k) / (f_m_plus - f_m)
+
+        filter_banks = np.dot(pow_spec, fbank.T)
+        filter_banks = np.where(filter_banks <= 1e-10, 1e-10, filter_banks)
+
+        log_fbanks = np.log(filter_banks)
+        mfcc = dct(log_fbanks, type=2, axis=1, norm='ortho')[:, :N_MFCC]
+
+        # Perubahan utama: Meratakan (flatten) seluruh bingkai MFCC, bukan mengambil nilai rata-ratanya
+        mfcc_flattened = mfcc.flatten()
+
+        # Memastikan dimensi konsisten jika ada variasi frame kecil
+        if len(mfcc_flattened) < TOTAL_FEATURES:
+            mfcc_flattened = np.pad(mfcc_flattened, (0, TOTAL_FEATURES - len(mfcc_flattened)))
+        elif len(mfcc_flattened) > TOTAL_FEATURES:
+            mfcc_flattened = mfcc_flattened[:TOTAL_FEATURES]
+
+        if np.isnan(mfcc_flattened).any():
+            return np.zeros(TOTAL_FEATURES)
+
+        return mfcc_flattened
+
+    except:
+        return np.zeros(TOTAL_FEATURES)
+
+# ==============================
+# 5. DATASET
+# ==============================
+X, y_labels = [], []
+
+for label in os.listdir(PROCESSED_PATH):
+    path = os.path.join(PROCESSED_PATH, label)
+    if not os.path.isdir(path):
+        continue
+
+    for file in os.listdir(path):
+        X.append(extract_features(os.path.join(path, file)))
+        y_labels.append(label)
+
+X = np.array(X)
+
+print("Shape X:", X.shape)
+print("NaN:", np.isnan(X).sum())
+
+# ==============================
+# 6. LABEL
+# ==============================
+le = LabelEncoder()
+y = le.fit_transform(y_labels)
+
+# ==============================
+# 7. SPLIT
+# ==============================
+X_train, X_val, y_train, y_val = train_test_split(
+    X, y, test_size=0.1, stratify=y, random_state=42
+)
+
+# ==============================
+# 8. SCALING
+# ==============================
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_val = scaler.transform(X_val)
+
+# ==============================
+# 9. MODEL
+# ==============================
+rf_model = RandomForestClassifier(
+    n_estimators=100,
+    max_depth=25,
+    min_samples_split=5,
+    min_samples_leaf=2,
+    random_state=42
+)
+
+# ==============================
+# 10. 5-FOLD CV + VISUALISASI
+# ==============================
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+cv_scores = cross_val_score(rf_model, X_train, y_train, cv=kf)
+
+plt.figure(figsize=(8,5))
+plt.plot(range(1,6), cv_scores, marker='o', linestyle='--')
+plt.title('Akurasi 5-Fold Cross Validation')
+plt.xlabel('Fold')
+plt.ylabel('Akurasi')
+plt.grid()
+plt.show()
+
+print("Rata-rata CV:", np.mean(cv_scores)*100)
+
+# ==============================
+# 11. TRAIN
+# ==============================
+rf_model.fit(X_train, y_train)
+y_pred = rf_model.predict(X_val)
+
+print("\n=== Classification Report ===")
+print(classification_report(y_val, y_pred, target_names=le.classes_))
+
+# ==============================
+# 12. CONFUSION MATRIX
+# ==============================
+cm = confusion_matrix(y_val, y_pred)
+
+disp = ConfusionMatrixDisplay(cm, display_labels=le.classes_)
+fig, ax = plt.subplots(figsize=(8,8))
+disp.plot(ax=ax, cmap='Blues', xticks_rotation='vertical')
+plt.title("Confusion Matrix")
+plt.show()
+
+# ==============================
+# 13. FEATURE IMPORTANCE
+# ==============================
+importances = rf_model.feature_importances_
+
+plt.figure(figsize=(12,5))
+plt.bar(range(TOTAL_FEATURES), importances * 100)
+
+plt.title("Feature Importance (MFCC Flattened)")
+plt.xlabel("Indeks Fitur")
+plt.ylabel("Importance (%)")
+
+ax = plt.gca()
+ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+plt.show()
+
+# ==============================
+# 14. SAVE MODEL
+# ==============================
+joblib.dump(rf_model, 'model_rf.pkl')
+
+pkl_size = os.path.getsize('model_rf.pkl') / 1024  # KB
+h_est = pkl_size * 3.5  # estimasi konversi ke .h
+
+print("\n=== UKURAN MODEL ===")
+print(f"Model .pkl : {pkl_size:.2f} KB")
+print(f"Estimasi .h : {h_est:.2f} KB")
+
+# ==============================
+# 15. PCA VISUALIZATION
+# ==============================
+pca = PCA(n_components=2)
+X_pca = pca.fit_transform(X_train)
+
+plt.figure(figsize=(10,7))
+
+for label in np.unique(y_train):
+    plt.scatter(
+        X_pca[y_train == label, 0],
+        X_pca[y_train == label, 1],
+        label=le.classes_[label],
+        alpha=0.7
+    )
+
+plt.title('Visualisasi PCA MFCC')
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.legend()
+plt.grid()
+plt.show()
+
+print("\nExplained Variance Ratio:")
+print(pca.explained_variance_ratio_)
+
+print("\nTotal Variance Explained:")
+print(np.sum(pca.explained_variance_ratio_) * 100, "%")
+
+# ==============================
+# 16. CONTOH NILAI MFCC
+# ==============================
+print("\n==============================")
+print("CONTOH NILAI MFCC TIAP KELAS")
+print("==============================")
+
+df_mfcc = pd.DataFrame(
+    X_train,
+    columns=[f"Fitur_{i+1}" for i in range(TOTAL_FEATURES)]
+)
+
+df_mfcc["label"] = y_train
+
+for label in np.unique(y_train):
+    print("\n")
+    print("="*60)
+    print("KELAS :", le.classes_[label])
+    print("="*60)
+
+    print(
+        df_mfcc[
+            df_mfcc["label"] == label
+        ].head(5)
+    )
+
+# ==============================
+# 17. CENTROID TIAP KELAS
+# ==============================
+print("\n==============================")
+print("CENTROID MFCC TIAP KELAS")
+print("==============================")
+
+centroids = {}
+
+for label in np.unique(y_train):
+    centroid = np.mean(
+        X_train[y_train == label],
+        axis=0
+    )
+    centroids[le.classes_[label]] = centroid
+
+centroid_df = pd.DataFrame(centroids).T
+centroid_df.columns = [f"Fitur_{i+1}" for i in range(TOTAL_FEATURES)]
+
+print(centroid_df.round(3))
+
+# ==============================
+# 18. HEATMAP CENTROID
+# ==============================
+plt.figure(figsize=(14,8))
+
+plt.imshow(
+    centroid_df,
+    cmap='coolwarm',
+    aspect='auto'
+)
+
+plt.colorbar()
+
+plt.yticks(
+    range(len(centroid_df.index)),
+    centroid_df.index
+)
+
+# Menampilkan label xticks kelipatan 100 agar visualisasi tetap rapi dan terbaca
+plt.xticks(
+    range(0, TOTAL_FEATURES, 100),
+    [f"F_{i}" for i in range(0, TOTAL_FEATURES, 100)],
+    rotation=45
+)
+
+plt.title("Heatmap Rata-rata MFCC Tiap Kelas (1274 Fitur)")
+plt.show()
+
+# ==============================
+# 19. JARAK ANTAR CENTROID
+# ==============================
+distance_matrix = squareform(
+    pdist(
+        centroid_df.values,
+        metric='euclidean'
+    )
+)
+
+distance_df = pd.DataFrame(
+    distance_matrix,
+    index=centroid_df.index,
+    columns=centroid_df.index
+)
+
+print("\n==============================")
+print("JARAK ANTAR KELAS")
+print("==============================")
+
+print(distance_df.round(3))
+
+# ==============================
+# 20. HEATMAP JARAK ANTAR KELAS
+# ==============================
+plt.figure(figsize=(10,8))
+
+plt.imshow(
+    distance_df,
+    cmap='viridis'
+)
+
+plt.colorbar()
+
+plt.xticks(
+    range(len(distance_df.columns)),
+    distance_df.columns,
+    rotation=45
+)
+
+plt.yticks(
+    range(len(distance_df.index)),
+    distance_df.index
+)
+
+plt.title("Jarak Euclidean Antar Centroid Kelas")
+plt.show()
